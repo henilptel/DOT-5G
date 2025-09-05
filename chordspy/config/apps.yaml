@@ -68,3 +68,10 @@ apps:
     script: "morse_decoder"
     description: "Decode EOG Signals into Alphabets based on Morse Code."
     category: "EOG"
+
+  - title: "EMG Robotic Arm Control"
+    icon: "fa-robot"
+    color: "indigo"
+    script: "emg_robotic_arm"
+    description: "Control robotic arm using EMG gestures - fist close/open cycles for grab/release operations."
+    category: "EMG"
