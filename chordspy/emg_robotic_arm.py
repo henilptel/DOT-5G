@@ -11,7 +11,8 @@ import threading
 import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                             QWidget, QLabel, QPushButton, QTextEdit, QProgressBar,
-                            QGroupBox, QGridLayout, QSlider, QSpinBox, QCheckBox)
+                            QGroupBox, QGridLayout, QSlider, QSpinBox, QCheckBox,
+                            QMessageBox)
 from PyQt5.QtCore import QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QPalette, QColor
 import pyqtgraph as pg
@@ -121,13 +122,15 @@ class EMGRoboticArmApp(QMainWindow):
         
         self.emg_status_label = QLabel("EMG Stream: ❌ Disconnected")
         self.arm_status_label = QLabel("Robotic Arm: ❌ Disconnected")
+        self.visualization_status_label = QLabel("Visualization: ❌ Stopped")
         
         connection_layout.addWidget(self.emg_status_label)
         connection_layout.addWidget(self.arm_status_label)
+        connection_layout.addWidget(self.visualization_status_label)
         
         # Control buttons
-        self.connect_btn = QPushButton("Connect to EMG Stream")
-        self.connect_arm_btn = QPushButton("Connect Robotic Arm")
+        self.emg_toggle_btn = QPushButton("Connect to EMG Stream")
+        self.arm_toggle_btn = QPushButton("Connect Robotic Arm")
         self.start_btn = QPushButton("Start Control")
         self.stop_btn = QPushButton("Stop Control")
         self.emergency_btn = QPushButton("🚨 EMERGENCY STOP")
@@ -135,9 +138,11 @@ class EMGRoboticArmApp(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.emergency_btn.setStyleSheet("QPushButton { background-color: red; color: white; font-weight: bold; }")
+        self.emg_toggle_btn.setStyleSheet("QPushButton { background-color: green; color: white; }")
+        self.arm_toggle_btn.setStyleSheet("QPushButton { background-color: green; color: white; }")
         
-        connection_layout.addWidget(self.connect_btn)
-        connection_layout.addWidget(self.connect_arm_btn)
+        connection_layout.addWidget(self.emg_toggle_btn)
+        connection_layout.addWidget(self.arm_toggle_btn)
         connection_layout.addWidget(self.start_btn)
         connection_layout.addWidget(self.stop_btn)
         connection_layout.addWidget(self.emergency_btn)
@@ -251,8 +256,8 @@ class EMGRoboticArmApp(QMainWindow):
     def setup_connections(self):
         """Setup signal connections."""
         # Button connections
-        self.connect_btn.clicked.connect(self.connect_emg_stream)
-        self.connect_arm_btn.clicked.connect(self.connect_robotic_arm)
+        self.emg_toggle_btn.clicked.connect(self.toggle_emg_stream)
+        self.arm_toggle_btn.clicked.connect(self.toggle_robotic_arm)
         self.start_btn.clicked.connect(self.start_control)
         self.stop_btn.clicked.connect(self.stop_control)
         self.emergency_btn.clicked.connect(self.emergency_stop)
@@ -265,10 +270,10 @@ class EMGRoboticArmApp(QMainWindow):
         self.min_duration_spinbox.valueChanged.connect(self.update_gesture_settings)
         self.max_duration_spinbox.valueChanged.connect(self.update_gesture_settings)
         
-        # Update timer for visualization
+        # Update timer for visualization (initially stopped)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_visualization)
-        self.update_timer.start(50)  # 20 FPS
+        # Don't start automatically - will start when EMG connects
         
         # Statistics update timer
         self.stats_timer = QTimer()
@@ -287,17 +292,134 @@ class EMGRoboticArmApp(QMainWindow):
         
         self.log_message("✅ Components initialized")
     
-    def connect_emg_stream(self):
+    def _start_visualization(self):
+        """Start the real-time visualization."""
+        if not self.update_timer.isActive():
+            self.update_timer.start(50)  # 20 FPS
+            self.visualization_status_label.setText("Visualization: ✅ Active")
+            self.log_message("📊 Started real-time visualization")
+            self.log_message("📊 Visualization is now active - you should see EMG plots")
+        else:
+            self.log_message("📊 Visualization was already active")
+    
+    def _stop_visualization(self):
+        """Stop the real-time visualization."""
+        if self.update_timer.isActive():
+            self.update_timer.stop()
+            # Clear the plots
+            self.emg_curve.setData([], [])
+            self.envelope_curve.setData([], [])
+            self.threshold_line.setData([], [])
+            self.visualization_status_label.setText("Visualization: ❌ Stopped")
+            self.log_message("📊 Stopped real-time visualization")
+    
+    def toggle_emg_stream(self):
+        """Toggle EMG stream connection (connect/disconnect)."""
+        if self.emg_thread.isRunning():
+            # Currently connected - disconnect
+            self._disconnect_emg_stream()
+        else:
+            # Currently disconnected - connect
+            self._connect_emg_stream()
+    
+    def _connect_emg_stream(self):
         """Connect to EMG LSL stream."""
         try:
             self.emg_thread.start()
             self.emg_status_label.setText("EMG Stream: ✅ Connected")
-            self.connect_btn.setEnabled(False)
+            self.emg_toggle_btn.setText("Disconnect EMG Stream")
+            self.emg_toggle_btn.setStyleSheet("QPushButton { background-color: orange; color: white; }")
             self.log_message("📡 Connected to EMG stream")
+            
+            # Auto-start visualization when EMG stream connects
+            self._start_visualization()
+            
+            # Enable start button if robotic arm is also connected
+            if self.robotic_arm and self.robotic_arm.is_connected():
+                self.start_btn.setEnabled(True)
+            
         except Exception as e:
             self.log_message(f"❌ Failed to connect to EMG stream: {e}")
     
-    def connect_robotic_arm(self):
+    def _disconnect_emg_stream(self):
+        """Safely disconnect from EMG LSL stream."""
+        # Show confirmation dialog
+        reply = QMessageBox.question(
+            self, 
+            'Disconnect EMG Stream', 
+            'Are you sure you want to disconnect from the EMG stream?\n\nThis will stop all gesture detection.',
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            # Stop control first if running
+            if self.gesture_detector and self.gesture_detector.running:
+                self.stop_control()
+                self.log_message("⏹️ Stopped control before disconnecting EMG stream")
+            
+            # Stop the EMG data thread
+            if self.emg_thread.isRunning():
+                self.emg_thread.stop()
+                self.log_message("📡 Disconnected from EMG stream")
+            
+            # Update UI
+            self.emg_status_label.setText("EMG Stream: ❌ Disconnected")
+            self.emg_toggle_btn.setText("Connect to EMG Stream")
+            self.emg_toggle_btn.setStyleSheet("QPushButton { background-color: green; color: white; }")
+            self.start_btn.setEnabled(False)
+            
+            # Stop visualization when EMG stream disconnects
+            self._stop_visualization()
+            
+            # Reset gesture detector
+            if self.gesture_detector:
+                self.gesture_detector.reset_statistics()
+                self.log_message("🔄 Reset gesture detector statistics")
+            
+        except Exception as e:
+            self.log_message(f"❌ Error disconnecting EMG stream: {e}")
+    
+    def _emergency_disconnect_emg_stream(self):
+        """Emergency disconnect from EMG LSL stream (no confirmation)."""
+        try:
+            # Stop control first if running
+            if self.gesture_detector and self.gesture_detector.running:
+                self.gesture_detector.stop_detection()
+                self.log_message("⏹️ Stopped control before emergency EMG disconnect")
+            
+            # Stop the EMG data thread
+            if self.emg_thread.isRunning():
+                self.emg_thread.stop()
+                self.log_message("📡 Emergency disconnected from EMG stream")
+            
+            # Update UI
+            self.emg_status_label.setText("EMG Stream: ❌ Disconnected")
+            self.emg_toggle_btn.setText("Connect to EMG Stream")
+            self.emg_toggle_btn.setStyleSheet("QPushButton { background-color: green; color: white; }")
+            self.start_btn.setEnabled(False)
+            
+            # Reset gesture detector
+            if self.gesture_detector:
+                self.gesture_detector.reset_statistics()
+                self.log_message("🔄 Reset gesture detector statistics")
+            
+        except Exception as e:
+            self.log_message(f"❌ Error during emergency EMG disconnect: {e}")
+    
+    def toggle_robotic_arm(self):
+        """Toggle robotic arm connection (connect/disconnect)."""
+        if self.robotic_arm and self.robotic_arm.is_connected():
+            # Currently connected - disconnect
+            self._disconnect_robotic_arm()
+        else:
+            # Currently disconnected - connect
+            self._connect_robotic_arm()
+    
+    def _connect_robotic_arm(self):
         """Connect to robotic arm."""
         try:
             mock_mode = self.mock_mode_checkbox.isChecked()
@@ -305,13 +427,94 @@ class EMGRoboticArmApp(QMainWindow):
             
             if self.robotic_arm.connect():
                 self.arm_status_label.setText("Robotic Arm: ✅ Connected")
-                self.connect_arm_btn.setEnabled(False)
-                self.start_btn.setEnabled(True)
+                self.arm_toggle_btn.setText("Disconnect Robotic Arm")
+                self.arm_toggle_btn.setStyleSheet("QPushButton { background-color: orange; color: white; }")
+                # Enable start button only if EMG stream is also connected
+                if self.emg_thread.isRunning():
+                    self.start_btn.setEnabled(True)
                 self.log_message("🤖 Connected to robotic arm")
             else:
                 self.log_message("❌ Failed to connect to robotic arm")
         except Exception as e:
             self.log_message(f"❌ Robotic arm connection error: {e}")
+    
+    def _disconnect_robotic_arm(self):
+        """Safely disconnect from robotic arm."""
+        # Show confirmation dialog
+        reply = QMessageBox.question(
+            self, 
+            'Disconnect Robotic Arm', 
+            'Are you sure you want to disconnect from the robotic arm?\n\nThis will send an emergency stop and disconnect the arm.',
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            # Stop control first if running
+            if self.gesture_detector and self.gesture_detector.running:
+                self.stop_control()
+                self.log_message("⏹️ Stopped control before disconnecting robotic arm")
+            
+            # Emergency stop the arm if connected
+            if self.robotic_arm and self.robotic_arm.is_connected():
+                self.robotic_arm.emergency_stop()
+                self.log_message("🚨 Emergency stop sent to robotic arm")
+                time.sleep(0.5)  # Give time for emergency stop to process
+            
+            # Disconnect the arm
+            if self.robotic_arm:
+                self.robotic_arm.disconnect()
+                self.log_message("🤖 Disconnected from robotic arm")
+            
+            # Update UI
+            self.arm_status_label.setText("Robotic Arm: ❌ Disconnected")
+            self.arm_toggle_btn.setText("Connect Robotic Arm")
+            self.arm_toggle_btn.setStyleSheet("QPushButton { background-color: green; color: white; }")
+            self.start_btn.setEnabled(False)
+            
+            # Reset controller state
+            if self.grab_release_controller:
+                self.grab_release_controller.reset()
+                self.log_message("🔄 Reset grab/release controller state")
+            
+        except Exception as e:
+            self.log_message(f"❌ Error disconnecting robotic arm: {e}")
+    
+    def _emergency_disconnect_robotic_arm(self):
+        """Emergency disconnect from robotic arm (no confirmation)."""
+        try:
+            # Stop control first if running
+            if self.gesture_detector and self.gesture_detector.running:
+                self.gesture_detector.stop_detection()
+                self.log_message("⏹️ Stopped control before emergency robotic arm disconnect")
+            
+            # Emergency stop the arm if connected
+            if self.robotic_arm and self.robotic_arm.is_connected():
+                self.robotic_arm.emergency_stop()
+                self.log_message("🚨 Emergency stop sent to robotic arm")
+                time.sleep(0.5)  # Give time for emergency stop to process
+            
+            # Disconnect the arm
+            if self.robotic_arm:
+                self.robotic_arm.disconnect()
+                self.log_message("🤖 Emergency disconnected from robotic arm")
+            
+            # Update UI
+            self.arm_status_label.setText("Robotic Arm: ❌ Disconnected")
+            self.arm_toggle_btn.setText("Connect Robotic Arm")
+            self.arm_toggle_btn.setStyleSheet("QPushButton { background-color: green; color: white; }")
+            self.start_btn.setEnabled(False)
+            
+            # Reset controller state
+            if self.grab_release_controller:
+                self.grab_release_controller.reset()
+                self.log_message("🔄 Reset grab/release controller state")
+            
+        except Exception as e:
+            self.log_message(f"❌ Error during emergency robotic arm disconnect: {e}")
     
     def start_control(self):
         """Start EMG control of robotic arm."""
@@ -334,12 +537,32 @@ class EMGRoboticArmApp(QMainWindow):
     
     def emergency_stop(self):
         """Emergency stop all operations."""
-        self.stop_control()
-        
-        if self.robotic_arm:
-            self.robotic_arm.emergency_stop()
-        
-        self.log_message("🚨 EMERGENCY STOP ACTIVATED")
+        try:
+            # Stop control first
+            self.stop_control()
+            
+            # Emergency stop the robotic arm
+            if self.robotic_arm and self.robotic_arm.is_connected():
+                self.robotic_arm.emergency_stop()
+                self.log_message("🚨 Emergency stop sent to robotic arm")
+            
+            # Disconnect EMG stream (no confirmation for emergency)
+            if self.emg_thread.isRunning():
+                self._emergency_disconnect_emg_stream()
+                self.log_message("🚨 EMG stream disconnected")
+            
+            # Stop visualization
+            self._stop_visualization()
+            
+            # Disconnect robotic arm (no confirmation for emergency)
+            if self.robotic_arm and self.robotic_arm.is_connected():
+                self._emergency_disconnect_robotic_arm()
+                self.log_message("🚨 Robotic arm disconnected")
+            
+            self.log_message("🚨 EMERGENCY STOP COMPLETE - All systems disconnected")
+            
+        except Exception as e:
+            self.log_message(f"❌ Error during emergency stop: {e}")
     
     def initialize_gesture_detector(self):
         """Initialize the gesture detector with current settings."""
@@ -392,26 +615,28 @@ class EMGRoboticArmApp(QMainWindow):
     
     def update_visualization(self):
         """Update the visualization plots."""
-        if self.gesture_detector:
-            # Get current envelope and threshold
-            stats = self.gesture_detector.get_statistics()
+        # Always update EMG plot if we have data
+        time_data = np.linspace(0, 1, len(self.emg_buffer))
+        self.emg_curve.setData(time_data, self.emg_buffer)
+        
+        # Update envelope plot (simplified - using RMS of recent data)
+        recent_data = self.emg_buffer[-100:]  # Last 100 samples
+        if len(recent_data) > 0:
+            rms_value = np.sqrt(np.mean(recent_data ** 2))
+            self.envelope_buffer[self.current_index] = rms_value
             
-            # Update EMG plot
-            time_data = np.linspace(0, 1, len(self.emg_buffer))
-            self.emg_curve.setData(time_data, self.emg_buffer)
+            envelope_time = np.linspace(0, 1, len(self.envelope_buffer))
+            self.envelope_curve.setData(envelope_time, self.envelope_buffer)
             
-            # Update envelope plot (simplified - using RMS of recent data)
-            recent_data = self.emg_buffer[-100:]  # Last 100 samples
-            if len(recent_data) > 0:
-                rms_value = np.sqrt(np.mean(recent_data ** 2))
-                self.envelope_buffer[self.current_index] = rms_value
-                
-                envelope_time = np.linspace(0, 1, len(self.envelope_buffer))
-                self.envelope_curve.setData(envelope_time, self.envelope_buffer)
-                
-                # Update threshold line
+            # Update threshold line if gesture detector is available
+            if self.gesture_detector:
+                stats = self.gesture_detector.get_statistics()
                 threshold_value = stats.get('adaptive_threshold', 0)
                 self.threshold_line.setData([0, 1], [threshold_value, threshold_value])
+            else:
+                # Show a default threshold line
+                default_threshold = np.mean(self.emg_buffer) * 2
+                self.threshold_line.setData([0, 1], [default_threshold, default_threshold])
     
     def update_statistics(self):
         """Update the statistics display."""
@@ -441,15 +666,30 @@ class EMGRoboticArmApp(QMainWindow):
     
     def closeEvent(self, event):
         """Handle application close event."""
-        self.stop_control()
-        
-        if self.robotic_arm:
-            self.robotic_arm.disconnect()
-        
-        if self.emg_thread.isRunning():
-            self.emg_thread.stop()
-        
-        event.accept()
+        try:
+            # Safely disconnect everything
+            self.log_message("🔄 Application closing - disconnecting all systems...")
+            
+            # Stop control first
+            self.stop_control()
+            
+            # Disconnect EMG stream (no confirmation on app close)
+            if self.emg_thread.isRunning():
+                self._emergency_disconnect_emg_stream()
+            
+            # Stop visualization
+            self._stop_visualization()
+            
+            # Disconnect robotic arm (no confirmation on app close)
+            if self.robotic_arm and self.robotic_arm.is_connected():
+                self._emergency_disconnect_robotic_arm()
+            
+            self.log_message("✅ Application closed safely")
+            
+        except Exception as e:
+            self.log_message(f"❌ Error during application close: {e}")
+        finally:
+            event.accept()
 
 
 def main():
