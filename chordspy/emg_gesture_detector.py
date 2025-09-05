@@ -4,6 +4,27 @@ This module provides real-time detection of fist close/open gestures for robotic
 It implements a simple threshold-based approach that can be extended with ML models later.
 """
 
+# =============================================================================
+# GLOBAL CONFIGURATION VARIABLES
+# =============================================================================
+
+# Filter Frequencies
+HIGH_PASS_FREQUENCY = 20.0                # High-pass filter frequency (Hz)
+LOW_PASS_FREQUENCY = 250.0                # Low-pass filter frequency (Hz)
+NOTCH_50_FREQUENCY = [49.0, 51.0]         # 50 Hz notch filter range
+NOTCH_60_FREQUENCY = [59.0, 61.0]         # 60 Hz notch filter range
+
+# Signal Processing Thresholds
+OUTLIER_THRESHOLD_BASE = 4.0              # Base outlier threshold
+MEDIAN_FILTER_KERNEL = 3                  # Median filter kernel size
+MOVING_AVERAGE_WINDOW = 2                 # Moving average window size
+
+# Gesture Detection Configuration
+DEFAULT_GESTURE_COOLDOWN = 0.5            # Default cooldown between gestures
+DEFAULT_COMMAND_COOLDOWN = 1.0            # Default cooldown between commands
+
+# =============================================================================
+
 import numpy as np
 from scipy.signal import butter, filtfilt
 from collections import deque
@@ -25,7 +46,7 @@ class EMGGestureDetector:
                  sampling_rate: int = 1000,
                  window_size: int = 200,  # 200ms window
                  overlap: int = 100,      # 50% overlap
-                 threshold_multiplier: float = 2.0,
+                 threshold_multiplier: float = 1.5,
                  min_gesture_duration: float = 0.1,  # 100ms minimum
                  max_gesture_duration: float = 2.0,  # 2s maximum
                  gesture_callback: Optional[Callable] = None):
@@ -78,14 +99,20 @@ class EMGGestureDetector:
         self.detection_thread = None
         
     def _setup_filters(self):
-        """Setup Butterworth filters for EMG signal processing."""
+        """Setup advanced filters for EMG signal processing."""
         nyquist = self.sampling_rate / 2.0
         
-        # High-pass filter (70 Hz)
-        self.hp_b, self.hp_a = butter(4, self.high_pass_freq / nyquist, btype='high')
+        # High-pass filter - remove DC and low-frequency noise
+        self.hp_b, self.hp_a = butter(4, HIGH_PASS_FREQUENCY / nyquist, btype='high')
         
-        # Low-pass filter (200 Hz) 
-        self.lp_b, self.lp_a = butter(4, self.low_pass_freq / nyquist, btype='low')
+        # Low-pass filter - remove high-frequency noise
+        self.lp_b, self.lp_a = butter(4, LOW_PASS_FREQUENCY / nyquist, btype='low')
+        
+        # Notch filter (50 Hz) - remove power line interference
+        self.notch_b, self.notch_a = butter(4, [NOTCH_50_FREQUENCY[0] / nyquist, NOTCH_50_FREQUENCY[1] / nyquist], btype='bandstop')
+        
+        # Notch filter (60 Hz) - remove power line interference
+        self.notch60_b, self.notch60_a = butter(4, [NOTCH_60_FREQUENCY[0] / nyquist, NOTCH_60_FREQUENCY[1] / nyquist], btype='bandstop')
         
     def _calculate_rms(self, signal: np.ndarray) -> float:
         """Calculate RMS (Root Mean Square) of the signal."""
@@ -98,6 +125,49 @@ class EMGGestureDetector:
     def _calculate_var(self, signal: np.ndarray) -> float:
         """Calculate VAR (Variance) of the signal."""
         return np.var(signal)
+    
+    def _apply_moving_average(self, signal: np.ndarray, window_size: int = 5) -> np.ndarray:
+        """Apply moving average filter to reduce noise."""
+        if len(signal) < window_size:
+            return signal
+        
+        # Use convolution for moving average
+        kernel = np.ones(window_size) / window_size
+        smoothed = np.convolve(signal, kernel, mode='same')
+        return smoothed
+    
+    def _apply_median_filter(self, signal: np.ndarray, kernel_size: int = 3) -> np.ndarray:
+        """Apply median filter to remove outliers and spikes."""
+        from scipy.signal import medfilt
+        return medfilt(signal, kernel_size)
+    
+    def _apply_savitzky_golay(self, signal: np.ndarray, window_length: int = 11, polyorder: int = 3) -> np.ndarray:
+        """Apply Savitzky-Golay filter for smooth signal enhancement."""
+        from scipy.signal import savgol_filter
+        if len(signal) < window_length:
+            return signal
+        
+        # Ensure window_length is odd
+        if window_length % 2 == 0:
+            window_length += 1
+        
+        return savgol_filter(signal, window_length, polyorder)
+    
+    def _remove_outliers(self, signal: np.ndarray, threshold: float = 3.0) -> np.ndarray:
+        """Remove outliers using statistical thresholding."""
+        mean_val = np.mean(signal)
+        std_val = np.std(signal)
+        
+        # Create mask for values within threshold
+        mask = np.abs(signal - mean_val) <= threshold * std_val
+        
+        # Replace outliers with interpolated values
+        if not np.all(mask):
+            indices = np.arange(len(signal))
+            signal_clean = np.interp(indices, indices[mask], signal[mask])
+            return signal_clean
+        
+        return signal
     
     def _extract_features(self, signal: np.ndarray) -> dict:
         """Extract features from EMG signal window."""
@@ -154,15 +224,46 @@ class EMGGestureDetector:
         # Detect gesture
         self._detect_gesture(rms_value)
     
-    def _apply_filters(self, signal: np.ndarray) -> np.ndarray:
-        """Apply high-pass and low-pass filters to the signal."""
-        # High-pass filter
-        filtered = filtfilt(self.hp_b, self.hp_a, signal)
-        
-        # Low-pass filter
-        filtered = filtfilt(self.lp_b, self.lp_a, filtered)
-        
-        return filtered
+    def _apply_filters(self, signal: np.ndarray, noise_reduction_level: int = 3) -> np.ndarray:
+        """Apply adaptive filtering based on noise reduction level."""
+        try:
+            # Basic filtering (always applied)
+            # Step 1: High-pass filter (remove DC and low-frequency noise)
+            filtered = filtfilt(self.hp_b, self.hp_a, signal)
+            
+            # Step 2: Notch filter (remove 50 Hz power line interference)
+            filtered = filtfilt(self.notch_b, self.notch_a, filtered)
+            
+            # Step 3: Notch filter (remove 60 Hz power line interference)
+            filtered = filtfilt(self.notch60_b, self.notch60_a, filtered)
+            
+            # Step 4: Low-pass filter (remove high-frequency noise)
+            filtered = filtfilt(self.lp_b, self.lp_a, filtered)
+            
+            # Adaptive filtering based on noise reduction level
+            if noise_reduction_level >= 2:
+                # Light outlier removal
+                outlier_threshold = OUTLIER_THRESHOLD_BASE - (noise_reduction_level * 0.5)
+                filtered = self._remove_outliers(filtered, threshold=outlier_threshold)
+            
+            if noise_reduction_level >= 3:
+                # Light median filter
+                filtered = self._apply_median_filter(filtered, kernel_size=MEDIAN_FILTER_KERNEL)
+            
+            if noise_reduction_level >= 4:
+                # Light moving average
+                window_size = min(MOVING_AVERAGE_WINDOW + 1, noise_reduction_level - 1)
+                filtered = self._apply_moving_average(filtered, window_size=window_size)
+            
+            if noise_reduction_level >= 5:
+                # Savitzky-Golay for maximum smoothing
+                if len(filtered) >= 11:
+                    filtered = self._apply_savitzky_golay(filtered, window_length=11, polyorder=3)
+            
+            return filtered
+        except Exception as e:
+            print(f"Filter error: {e}")
+            return signal  # Return original signal if filtering fails
     
     def _detect_gesture(self, rms_value: float):
         """Detect fist close/open gestures based on RMS threshold."""
@@ -273,7 +374,7 @@ class GrabReleaseController:
         self.fist_cycle_count = 0
         self.command_callback = command_callback
         self.last_command_time = 0.0
-        self.command_cooldown = 1.0  # 1 second cooldown between commands
+        self.command_cooldown = DEFAULT_COMMAND_COOLDOWN
         
     def process_gesture(self):
         """

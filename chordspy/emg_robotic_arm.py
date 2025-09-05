@@ -4,6 +4,50 @@ This application integrates EMG gesture detection with robotic arm control.
 It provides a complete system for controlling a robotic arm using EMG signals.
 """
 
+# =============================================================================
+# GLOBAL CONFIGURATION VARIABLES
+# =============================================================================
+
+# Signal Processing Configuration
+ENABLE_ADVANCED_FILTERING = True          # Enable/disable advanced filtering
+DEFAULT_NOISE_REDUCTION_LEVEL = 2         # Default noise reduction (1-5)
+DEFAULT_THRESHOLD_MULTIPLIER = 1          # Default threshold sensitivity (1-10)
+DEFAULT_MIN_GESTURE_DURATION = 50         # Minimum gesture duration in ms
+DEFAULT_MAX_GESTURE_DURATION = 2000       # Maximum gesture duration in ms
+
+# Visualization Configuration
+VISUALIZATION_UPDATE_RATE = 50            # Visualization update rate in ms (20 FPS)
+ENABLE_VISUALIZATION_SMOOTHING = True     # Enable smoothing for visualization
+VISUALIZATION_SMOOTHING_WINDOW = 3        # Window size for visualization smoothing
+
+# Gesture Detection Configuration
+ENABLE_AUTO_VISUALIZATION = True          # Auto-start visualization on EMG connect
+ENABLE_CONFIRMATION_DIALOGS = True        # Enable confirmation dialogs for disconnect
+GESTURE_COOLDOWN_TIME = 0.5               # Cooldown between gestures in seconds
+COMMAND_COOLDOWN_TIME = 1.0               # Cooldown between commands in seconds
+
+# Robotic Arm Configuration
+DEFAULT_MOCK_MODE = True                  # Default to mock mode (no hardware)
+EMERGENCY_STOP_DELAY = 0.5                # Delay for emergency stop processing
+
+# UI Configuration
+ENABLE_DEBUG_LOGGING = True               # Enable detailed debug logging
+LOG_MAX_LINES = 100                       # Maximum lines in log display
+STATS_UPDATE_INTERVAL = 1000              # Statistics update interval in ms
+
+# Signal Processing Thresholds
+OUTLIER_THRESHOLD_BASE = 4.0              # Base outlier threshold
+MEDIAN_FILTER_KERNEL = 3                  # Median filter kernel size
+MOVING_AVERAGE_WINDOW = 2                 # Moving average window size
+
+# Filter Frequencies
+HIGH_PASS_FREQUENCY = 20.0                # High-pass filter frequency (Hz)
+LOW_PASS_FREQUENCY = 250.0                # Low-pass filter frequency (Hz)
+NOTCH_50_FREQUENCY = [49.0, 51.0]         # 50 Hz notch filter range
+NOTCH_60_FREQUENCY = [59.0, 61.0]         # 60 Hz notch filter range
+
+# =============================================================================
+
 import numpy as np
 import pylsl
 import time
@@ -157,27 +201,41 @@ class EMGRoboticArmApp(QMainWindow):
         gesture_layout.addWidget(QLabel("Threshold Multiplier:"), 0, 0)
         self.threshold_spinbox = QSpinBox()
         self.threshold_spinbox.setRange(1, 10)
-        self.threshold_spinbox.setValue(2)
+        self.threshold_spinbox.setValue(DEFAULT_THRESHOLD_MULTIPLIER)
         gesture_layout.addWidget(self.threshold_spinbox, 0, 1)
         
         # Min gesture duration
         gesture_layout.addWidget(QLabel("Min Duration (ms):"), 1, 0)
         self.min_duration_spinbox = QSpinBox()
         self.min_duration_spinbox.setRange(50, 1000)
-        self.min_duration_spinbox.setValue(100)
+        self.min_duration_spinbox.setValue(DEFAULT_MIN_GESTURE_DURATION)
         gesture_layout.addWidget(self.min_duration_spinbox, 1, 1)
         
         # Max gesture duration
         gesture_layout.addWidget(QLabel("Max Duration (ms):"), 2, 0)
         self.max_duration_spinbox = QSpinBox()
         self.max_duration_spinbox.setRange(500, 5000)
-        self.max_duration_spinbox.setValue(2000)
+        self.max_duration_spinbox.setValue(DEFAULT_MAX_GESTURE_DURATION)
         gesture_layout.addWidget(self.max_duration_spinbox, 2, 1)
         
         # Mock mode checkbox
         self.mock_mode_checkbox = QCheckBox("Mock Mode (No Hardware)")
-        self.mock_mode_checkbox.setChecked(True)
+        self.mock_mode_checkbox.setChecked(DEFAULT_MOCK_MODE)
         gesture_layout.addWidget(self.mock_mode_checkbox, 3, 0, 1, 2)
+        
+        # Signal processing options
+        gesture_layout.addWidget(QLabel("Signal Processing:"), 4, 0)
+        self.advanced_filtering_checkbox = QCheckBox("Advanced Filtering (Recommended)")
+        self.advanced_filtering_checkbox.setChecked(ENABLE_ADVANCED_FILTERING)
+        gesture_layout.addWidget(self.advanced_filtering_checkbox, 4, 1)
+        
+        # Noise reduction level
+        gesture_layout.addWidget(QLabel("Noise Reduction:"), 5, 0)
+        self.noise_reduction_spinbox = QSpinBox()
+        self.noise_reduction_spinbox.setRange(1, 5)
+        self.noise_reduction_spinbox.setValue(DEFAULT_NOISE_REDUCTION_LEVEL)
+        self.noise_reduction_spinbox.setToolTip("1=Minimal, 5=Maximum noise reduction")
+        gesture_layout.addWidget(self.noise_reduction_spinbox, 5, 1)
         
         layout.addWidget(gesture_group)
         
@@ -269,6 +327,8 @@ class EMGRoboticArmApp(QMainWindow):
         self.threshold_spinbox.valueChanged.connect(self.update_gesture_settings)
         self.min_duration_spinbox.valueChanged.connect(self.update_gesture_settings)
         self.max_duration_spinbox.valueChanged.connect(self.update_gesture_settings)
+        self.advanced_filtering_checkbox.toggled.connect(self.update_gesture_settings)
+        self.noise_reduction_spinbox.valueChanged.connect(self.update_gesture_settings)
         
         # Update timer for visualization (initially stopped)
         self.update_timer = QTimer()
@@ -278,7 +338,7 @@ class EMGRoboticArmApp(QMainWindow):
         # Statistics update timer
         self.stats_timer = QTimer()
         self.stats_timer.timeout.connect(self.update_statistics)
-        self.stats_timer.start(1000)  # 1 second
+        self.stats_timer.start(STATS_UPDATE_INTERVAL)
     
     def initialize_components(self):
         """Initialize the gesture detector and robotic arm controller."""
@@ -295,12 +355,14 @@ class EMGRoboticArmApp(QMainWindow):
     def _start_visualization(self):
         """Start the real-time visualization."""
         if not self.update_timer.isActive():
-            self.update_timer.start(50)  # 20 FPS
+            self.update_timer.start(VISUALIZATION_UPDATE_RATE)
             self.visualization_status_label.setText("Visualization: ✅ Active")
-            self.log_message("📊 Started real-time visualization")
-            self.log_message("📊 Visualization is now active - you should see EMG plots")
+            if ENABLE_DEBUG_LOGGING:
+                self.log_message("📊 Started real-time visualization")
+                self.log_message("📊 Visualization is now active - you should see EMG plots")
         else:
-            self.log_message("📊 Visualization was already active")
+            if ENABLE_DEBUG_LOGGING:
+                self.log_message("📊 Visualization was already active")
     
     def _stop_visualization(self):
         """Stop the real-time visualization."""
@@ -343,17 +405,18 @@ class EMGRoboticArmApp(QMainWindow):
     
     def _disconnect_emg_stream(self):
         """Safely disconnect from EMG LSL stream."""
-        # Show confirmation dialog
-        reply = QMessageBox.question(
-            self, 
-            'Disconnect EMG Stream', 
-            'Are you sure you want to disconnect from the EMG stream?\n\nThis will stop all gesture detection.',
-            QMessageBox.Yes | QMessageBox.No, 
-            QMessageBox.No
-        )
-        
-        if reply != QMessageBox.Yes:
-            return
+        # Show confirmation dialog if enabled
+        if ENABLE_CONFIRMATION_DIALOGS:
+            reply = QMessageBox.question(
+                self, 
+                'Disconnect EMG Stream', 
+                'Are you sure you want to disconnect from the EMG stream?\n\nThis will stop all gesture detection.',
+                QMessageBox.Yes | QMessageBox.No, 
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
         
         try:
             # Stop control first if running
@@ -440,17 +503,18 @@ class EMGRoboticArmApp(QMainWindow):
     
     def _disconnect_robotic_arm(self):
         """Safely disconnect from robotic arm."""
-        # Show confirmation dialog
-        reply = QMessageBox.question(
-            self, 
-            'Disconnect Robotic Arm', 
-            'Are you sure you want to disconnect from the robotic arm?\n\nThis will send an emergency stop and disconnect the arm.',
-            QMessageBox.Yes | QMessageBox.No, 
-            QMessageBox.No
-        )
-        
-        if reply != QMessageBox.Yes:
-            return
+        # Show confirmation dialog if enabled
+        if ENABLE_CONFIRMATION_DIALOGS:
+            reply = QMessageBox.question(
+                self, 
+                'Disconnect Robotic Arm', 
+                'Are you sure you want to disconnect from the robotic arm?\n\nThis will send an emergency stop and disconnect the arm.',
+                QMessageBox.Yes | QMessageBox.No, 
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
         
         try:
             # Stop control first if running
@@ -578,13 +642,22 @@ class EMGRoboticArmApp(QMainWindow):
             gesture_callback=self.grab_release_controller.process_gesture
         )
         
-        self.log_message(f"🎯 Gesture detector initialized (threshold: {threshold_multiplier}x)")
+        # Set noise reduction level
+        noise_reduction = self.noise_reduction_spinbox.value()
+        self.gesture_detector.noise_reduction_level = noise_reduction
+        
+        self.log_message(f"🎯 Gesture detector initialized (threshold: {threshold_multiplier}x, noise reduction: {noise_reduction})")
     
     def update_gesture_settings(self):
         """Update gesture detector settings."""
         if self.gesture_detector:
             threshold_multiplier = self.threshold_spinbox.value()
             self.gesture_detector.set_threshold_multiplier(threshold_multiplier)
+            
+            # Log signal processing settings
+            advanced_filtering = self.advanced_filtering_checkbox.isChecked()
+            noise_reduction = self.noise_reduction_spinbox.value()
+            self.log_message(f"🔧 Signal processing: Advanced={advanced_filtering}, Noise reduction={noise_reduction}")
     
     def process_emg_data(self, data):
         """Process incoming EMG data."""
@@ -614,15 +687,22 @@ class EMGRoboticArmApp(QMainWindow):
                 self.log_message("🤖 Command: RELEASE")
     
     def update_visualization(self):
-        """Update the visualization plots."""
+        """Update the visualization plots with enhanced signal processing."""
         # Always update EMG plot if we have data
         time_data = np.linspace(0, 1, len(self.emg_buffer))
-        self.emg_curve.setData(time_data, self.emg_buffer)
         
-        # Update envelope plot (simplified - using RMS of recent data)
+        # Apply basic smoothing for visualization
+        if len(self.emg_buffer) > 0:
+            # Apply moving average for smoother visualization
+            smoothed_buffer = self._apply_visualization_smoothing(self.emg_buffer)
+            self.emg_curve.setData(time_data, smoothed_buffer)
+        
+        # Update envelope plot with improved RMS calculation
         recent_data = self.emg_buffer[-100:]  # Last 100 samples
         if len(recent_data) > 0:
-            rms_value = np.sqrt(np.mean(recent_data ** 2))
+            # Apply smoothing to recent data for better envelope
+            smoothed_recent = self._apply_visualization_smoothing(recent_data)
+            rms_value = np.sqrt(np.mean(smoothed_recent ** 2))
             self.envelope_buffer[self.current_index] = rms_value
             
             envelope_time = np.linspace(0, 1, len(self.envelope_buffer))
@@ -634,9 +714,19 @@ class EMGRoboticArmApp(QMainWindow):
                 threshold_value = stats.get('adaptive_threshold', 0)
                 self.threshold_line.setData([0, 1], [threshold_value, threshold_value])
             else:
-                # Show a default threshold line
-                default_threshold = np.mean(self.emg_buffer) * 2
+                # Show a default threshold line based on smoothed data
+                default_threshold = np.mean(smoothed_recent) * 2
                 self.threshold_line.setData([0, 1], [default_threshold, default_threshold])
+    
+    def _apply_visualization_smoothing(self, signal: np.ndarray) -> np.ndarray:
+        """Apply smoothing for visualization purposes."""
+        if not ENABLE_VISUALIZATION_SMOOTHING or len(signal) < VISUALIZATION_SMOOTHING_WINDOW:
+            return signal
+        
+        # Simple moving average for visualization
+        kernel = np.ones(VISUALIZATION_SMOOTHING_WINDOW) / VISUALIZATION_SMOOTHING_WINDOW
+        smoothed = np.convolve(signal, kernel, mode='same')
+        return smoothed
     
     def update_statistics(self):
         """Update the statistics display."""
@@ -659,10 +749,10 @@ class EMGRoboticArmApp(QMainWindow):
         timestamp = time.strftime("%H:%M:%S")
         self.log_text.append(f"[{timestamp}] {message}")
         
-        # Keep only last 100 lines
+        # Keep only last LOG_MAX_LINES lines
         lines = self.log_text.toPlainText().split('\n')
-        if len(lines) > 100:
-            self.log_text.setPlainText('\n'.join(lines[-100:]))
+        if len(lines) > LOG_MAX_LINES:
+            self.log_text.setPlainText('\n'.join(lines[-LOG_MAX_LINES:]))
     
     def closeEvent(self, event):
         """Handle application close event."""
